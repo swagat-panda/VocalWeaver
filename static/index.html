@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Voice Changer Service</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #f0f2f5; color: #1c1e21; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+        .container { background-color: #fff; padding: 2rem; border-radius: 8px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1); text-align: center; width: 90%; max-width: 500px; }
+        h1 { color: #0d6efd; }
+        select, button { width: 100%; padding: 12px; margin-top: 1rem; border-radius: 6px; border: 1px solid #ddd; font-size: 1rem; }
+        button { background-color: #0d6efd; color: white; border: none; cursor: pointer; transition: background-color 0.3s; }
+        button:disabled { background-color: #a0c7ff; cursor: not-allowed; }
+        button.recording { background-color: #dc3545; }
+        #status, #transcribedText { margin-top: 1.5rem; color: #606770; }
+        textarea { width: calc(100% - 24px); margin-top: 1rem; padding: 12px; border-radius: 6px; border: 1px solid #ddd; font-size: 1rem; resize: vertical; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Real-time Voice Changer</h1>
+        <p>Select a voice, press record, and speak for a few seconds.</p>
+        
+        <select id="voiceSelector" disabled>
+            <option>Connecting to server...</option>
+        </select>
+
+        <button id="recordButton" disabled>Connect to Server to Record</button>
+        
+        <div id="status">Ready.</div>
+        <textarea id="transcribedText" rows="3" placeholder="Transcribed text will appear here..." readonly></textarea>
+    </div>
+
+    <script>
+        const voiceSelector = document.getElementById('voiceSelector');
+        const recordButton = document.getElementById('recordButton');
+        const statusDiv = document.getElementById('status');
+        const transcribedText = document.getElementById('transcribedText');
+
+        let socket;
+        let mediaRecorder;
+        let audioChunks = [];
+
+        function connectWebSocket() {
+            // Use wss:// for secure connections (https)
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            socket = new WebSocket(`${protocol}//${window.location.hostname}:8000/ws`);
+
+            socket.onopen = () => {
+                statusDiv.textContent = 'Connected. Ready to record.';
+                recordButton.disabled = false;
+                recordButton.textContent = 'Start Recording';
+            };
+
+            socket.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                switch (data.type) {
+                    case 'voices':
+                        populateVoices(data.data);
+                        break;
+                    case 'status':
+                        statusDiv.textContent = data.message;
+                        break;
+                    case 'result':
+                        handleResult(data);
+                        break;
+                }
+            };
+
+            socket.onclose = () => {
+                statusDiv.textContent = 'Disconnected. Trying to reconnect...';
+                recordButton.disabled = true;
+                setTimeout(connectWebSocket, 3000); // Reconnect after 3 seconds
+            };
+
+            socket.onerror = (error) => {
+                console.error('WebSocket Error:', error);
+                statusDiv.textContent = 'Connection error.';
+                recordButton.disabled = true;
+            };
+        }
+
+        function populateVoices(voices) {
+            voiceSelector.innerHTML = '';
+            voices.forEach(voice => {
+                const option = document.createElement('option');
+                option.value = voice;
+                option.textContent = voice;
+                voiceSelector.appendChild(option);
+            });
+            voiceSelector.disabled = false;
+        }
+
+        function handleResult(data) {
+            statusDiv.textContent = 'Processing complete. Ready.';
+            transcribedText.value = data.text;
+            if (data.audio) {
+                const audioBlob = base64ToBlob(data.audio, 'audio/wav');
+                const audioUrl = URL.createObjectURL(audioBlob);
+                new Audio(audioUrl).play();
+            }
+            recordButton.disabled = false;
+        }
+
+        recordButton.addEventListener('click', () => {
+            if (mediaRecorder && mediaRecorder.state === 'recording') {
+                mediaRecorder.stop();
+                recordButton.textContent = 'Processing...';
+                recordButton.classList.remove('recording');
+                recordButton.disabled = true;
+            } else {
+                startRecording();
+            }
+        });
+
+        async function startRecording() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+                audioChunks = [];
+
+                mediaRecorder.ondataavailable = event => {
+                    audioChunks.push(event.data);
+                };
+
+                mediaRecorder.onstop = () => {
+                    const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
+                    const reader = new FileReader();
+                    reader.onloadend = () => {
+                        // Get base64 string and remove the data URL prefix
+                        const base64String = reader.result.split(',')[1];
+                        const message = {
+                            voice: voiceSelector.value,
+                            audio: base64String
+                        };
+                        socket.send(JSON.stringify(message));
+                    };
+                    reader.readAsDataURL(audioBlob);
+                };
+
+                mediaRecorder.start();
+                recordButton.textContent = 'Stop Recording';
+                recordButton.classList.add('recording');
+                statusDiv.textContent = 'Recording...';
+            } catch (err) {
+                console.error('Error accessing microphone:', err);
+                statusDiv.textContent = 'Could not access microphone. Please grant permission.';
+            }
+        }
+        
+        function base64ToBlob(base64, contentType = '', sliceSize = 512) {
+            const byteCharacters = atob(base64);
+            const byteArrays = [];
+            for (let offset = 0; offset < byteCharacters.length; offset += sliceSize) {
+                const slice = byteCharacters.slice(offset, offset + sliceSize);
+                const byteNumbers = new Array(slice.length);
+                for (let i = 0; i < slice.length; i++) {
+                    byteNumbers[i] = slice.charCodeAt(i);
+                }
+                const byteArray = new Uint8Array(byteNumbers);
+                byteArrays.push(byteArray);
+            }
+            return new Blob(byteArrays, { type: contentType });
+        }
+        
+        // Initial connection
+        connectWebSocket();
+    </script>
+</body>
+</html>
